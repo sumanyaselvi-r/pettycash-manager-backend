@@ -22,7 +22,7 @@ const app = express();
 const PORT = 4000;
 
 const corsOptions = {
-  origin: '*',
+  origin: 'https://precious-hummingbird-7f25db.netlify.app',
   credentials: true,
 };
 
