@@ -20,7 +20,14 @@ const cors = require("cors")
 
 const app = express();
 const PORT = 4000;
-app.use(cors())
+
+const corsOptions = {
+  origin: 'https://precious-hummingbird-7f25db.netlify.app/',
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+
 // MongoDB connection string
 const URL = process.env.DB;
 
