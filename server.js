@@ -7,7 +7,12 @@ const csv = require('fast-csv');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
+const jsonwebtoken = require('jsonwebtoken');
 const fs = require('fs');
 
 dotenv.config();
@@ -31,39 +36,188 @@ MongoClient.connect(URL)
 
 // Middleware
 app.use(express.json());
-// API endpoint to add a new transaction
-app.post('/api/transactions', async (req, res) => {
-  const newTransaction = req.body;
-  try {
-    const result = await db.collection('transactions').insertOne(newTransaction);
-    const savedTransaction = await db.collection('transactions').findOne({ _id: result.insertedId });
-    res.status(201).json(savedTransaction);
-    console.log(savedTransaction)
-  } catch (error) {
-    console.error('Error adding transaction:', error);
+// Registration endpoint
+app.post('/api/register', async (req, res) => {
+  const { username, email, password } = req.body;
 
+  try {
+    // Check if the username or email already exists
+    const existingUser = await db.collection('users').findOne({ $or: [{ username }, { email }] });
+
+    if (existingUser) {
+      return res.status(409).json({ message: 'Username or email already exists' });
+    }
+
+    // Hash the password before storing it
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Save user data to the database
+    const result = await db.collection('users').insertOne({
+      username,
+      email,
+      password: hashedPassword,
+    });
+
+    res.status(201).json({ message: 'User registered successfully', userId: result.insertedId });
+  } catch (error) {
+    console.error('Error registering user:', error);
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
+// API endpoint for user login
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    // Find the user by username
+    const user = await db.collection('users').findOne({ username });
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid username or password' });
+    }
+
+    // Compare the provided password with the hashed password
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ message: 'Invalid username or password' });
+    }
+
+    // Generate a JWT token
+    const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+   
+    // Send user details along with the token
+    res.json({
+      token,
+      user: {
+        userId: user._id,
+        username: user.username,
+        token,
+       
+       
+      },
+    });
+  
+
+   console.log('login');
+  } catch (error) {
+    console.error('Error during login:', error);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+app.post('/api/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const user = await db.collection('users').findOne({ email });
+
+    if (!user) {
+      console.log('User not registered');
+      return res.status(404).json({ message: 'User not registered' });
+    }
+
+    const token = jsonwebtoken.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+    await db.collection('users').updateOne({ email }, {
+      $set: { token }
+    });
+
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD,
+      },
+    });
+
+    const info = await transporter.sendMail({
+      from: process.env.MAIL_ID,
+      to: email,
+      subject: 'Reset password link',
+      text: `Click the following link to reset your password: http://localhost:3000/reset-password/${token}`
+    });
+
+    console.log('Password reset link sent successfully.');
+    res.json({ message: 'Password reset link sent successfully.' });
+  } catch (error) {
+    console.error('Failed to send password reset email:', error);
+    res.status(500).json({ message: 'Failed to send password reset email.' });
+  }
+});
+app.post("/reset-password/:token", async (req, res) => {
+  try {
+    const { password, confirmPassword } = req.body;
+    let token = req.params.token;
+
+    // Remove leading colon if present
+    token = token.replace(/^:/, '');
+
+    jsonwebtoken.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
+      if (err) {
+        console.error('Error with token:', err);
+        return res.status(400).json({ message: 'Error with token' });
+      }
+
+      try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await db.collection("users").updateOne({ token }, {
+          $set: {
+            password: hashedPassword,
+            // Assuming you want to store confirmPassword, you might want to remove this line if not needed
+            confirmPassword: hashedPassword
+          }
+        });
+
+        console.log('Password changed successfully.');
+        res.json({ message: 'Password changed successfully' });
+      } catch (error) {
+        console.error('Failed to reset password:', error);
+        res.status(500).json({ message: 'Failed to reset password' });
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
 // API endpoint to get all transactions
+
+const authenticateToken = (req, res, next) => {
+  const token = req.headers.authorization && req.headers.authorization.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ message: 'Unauthorized: Missing token' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ message: 'Forbidden: Invalid token' });
+    }
+
+    req.user = user;  
+    next();
+  });
+};
+app.use(authenticateToken)
 // API endpoint to get all transactions with optional sorting
-app.get('/api/transactions', async (req, res) => {
+
+app.get('/api/transactions',  async (req, res) => {
   try {
     // Convert 'amount' field from string to number
     await db.collection('transactions').find({ amount: { $type: 'string' } }).forEach(async function (doc) {
       await db.collection('transactions').updateOne({ _id: doc._id }, { $set: { amount: parseFloat(doc.amount) } });
     });
 
-    // Fetch transactions with sorting
+    // Fetch transactions for the authenticated user with sorting
+    const userId = req.user.userId;
     let sortBy = req.query.sortBy || 'date';
     const sortOrder = sortBy === 'date' ? -1 : 1; // -1 for descending, 1 for ascending
     const searchTerm = req.query.searchTerm || ''; // Extract search term from query
 
-    let query = {};
-    if (searchTerm) {
-      // Case-insensitive search for the 'description' field
-      query = { description: { $regex: new RegExp(searchTerm, 'i') } };
-    }
+    const query = {
+      userId: userId, // Add this condition to filter transactions by user ID
+      ...(searchTerm ? { description: { $regex: new RegExp(searchTerm, 'i') } } : {}), // Add search condition if searchTerm is provided
+    };
 
     const transactions = await db.collection('transactions').find(query).sort({ [sortBy]: sortOrder }).toArray();
 
@@ -73,24 +227,72 @@ app.get('/api/transactions', async (req, res) => {
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
-// API endpoint to edit a transaction
 
-app.put('/api/transactions/:id', async (req, res) => {
+
+app.post('/api/transactions', async (req, res) => {
+  console.log('Request Body:', req.body);
+  try {
+       // Extract transaction data from the request body
+       const { date, description, amount, category, type } = req.body;
+       const userId = req.user.userId;  // Extract userId from the authenticated user
+   
+       // Convert the 'amount' field from string to number
+       const numericAmount = parseFloat(amount);
+   
+       // Create a new transaction object
+       const newTransaction = {
+         date,
+         description,
+         amount: numericAmount,
+         category,
+         type,
+         userId,
+       };
+   
+       // Insert the new transaction into the 'transactions' collection
+       const result = await db.collection('transactions').insertOne(newTransaction);
+   
+       // Return the inserted transaction with the generated ID
+       const insertedTransaction = {
+         _id: result.insertedId,
+         ...newTransaction,
+       };
+   
+       res.status(201).json(insertedTransaction);
+       console.log(insertedTransaction);
+     } catch (error) {
+       console.error('Error adding transaction:', error);
+       res.status(500).json({ message: 'Internal Server Error' });
+     }
+});
+// API endpoint to edit a transaction
+app.put('/api/transactions/:id',  async (req, res) => {
   const { id } = req.params;
   const updatedTransaction = req.body;
 
-  // Exclude the _id field from the update
+  // Extract userId from the authenticated user
+  const userId = req.user.userId;
+
+  // Exclude the _id and userId fields from the update
   delete updatedTransaction._id;
+  delete updatedTransaction.userId;
 
   try {
     const result = await db
       .collection('transactions')
       .findOneAndUpdate(
-        { _id: new ObjectId(id) },
+        { _id: new ObjectId(id), userId: userId }, // Ensure both transaction ID and userId match
         { $set: updatedTransaction },
         { returnDocument: 'after' }
       );
-    res.json(result.value);
+
+    if (!result.value) {
+      // Handle the case where the updated transaction is not found or doesn't belong to the user
+      console.error('Error updating transaction: Transaction not found or unauthorized');
+      res.status(404).json({ message: 'Transaction not found or unauthorized' });
+    } else {
+      res.json({ message: 'Transaction updated successfully', data: result.value });
+    }
   } catch (error) {
     console.error('Error updating transaction:', error);
     res.status(500).json({ message: 'Internal Server Error' });
@@ -98,22 +300,38 @@ app.put('/api/transactions/:id', async (req, res) => {
 });
 
 
+
 app.delete('/api/transactions/:id', async (req, res) => {
   const { id } = req.params;
 
+  // Extract userId from the request's decoded token (provided by the authenticateToken middleware)
+  const userId = req.user.userId;
+
   try {
-    await db.collection('transactions').deleteOne({ _id: new ObjectId(id) });
-    res.json({ message: 'Transaction deleted successfully' });
+    const result = await db.collection('transactions').deleteOne({
+      _id: new ObjectId(id),
+      userId: userId, // Ensure the transaction belongs to the authenticated user
+    });
+
+    if (result.deletedCount === 0) {
+      // Handle the case where the transaction is not found or doesn't belong to the user
+      console.error('Error deleting transaction: Transaction not found or unauthorized');
+      res.status(404).json({ message: 'Transaction not found or unauthorized' });
+    } else {
+      res.json({ message: 'Transaction deleted successfully' });
+    }
   } catch (error) {
     console.error('Error deleting transaction:', error);
     res.status(500).json({ message: 'Internal Server Error' });
   }
-});
-
-// API endpoint to get transaction summary
-app.get('/api/transaction-summary', async (req, res) => {
+});;
+app.get('/api/transaction-summary', authenticateToken, async (req, res) => {
   try {
+    // Use req.user to access the authenticated user's information
     const summary = await db.collection('transactions').aggregate([
+      {
+        $match: { userId: req.user.userId } // Filter transactions by userId
+      },
       {
         $group: {
           _id: null,
@@ -139,19 +357,21 @@ app.get('/api/transaction-summary', async (req, res) => {
 });
 // New endpoint to handle different report types
 // New endpoint to handle different report types
-app.get('/api/transactions/report', async (req, res) => {
+
+app.get('/api/transactions/report',  async (req, res) => {
   try {
     let transactions;
 
     const reportType = req.query.type;
-    let query = {};
-
+   
+    const { userId } = req.user;
     if (reportType === 'monthly') {
       const currentDate = new Date();
       const startOfMonth = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}-01`;
       const endOfMonth = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 2).toString().padStart(2, '0')}-01`;
 
       transactions = await db.collection('transactions').find({
+        userId: userId, // Ensure the transactions belong to the authenticated user
         date: { $gte: startOfMonth, $lt: endOfMonth }
       }).sort({ date: 1 }).toArray();
     } else if (reportType === 'yearly') {
@@ -159,6 +379,7 @@ app.get('/api/transactions/report', async (req, res) => {
       const endOfYear = `${new Date().getFullYear() + 1}-01-01`;
 
       transactions = await db.collection('transactions').find({
+        userId: userId, // Ensure the transactions belong to the authenticated user
         date: { $gte: startOfYear, $lt: endOfYear }
       }).sort({ date: 1 }).toArray();
     } else if (reportType === 'custom') {
@@ -166,10 +387,13 @@ app.get('/api/transactions/report', async (req, res) => {
       const endDate = req.query.endDate;     // Assuming endDate is in "YYYY-MM-DD" format
 
       transactions = await db.collection('transactions').find({
+        userId: userId, // Ensure the transactions belong to the authenticated user
         date: { $gte: startDate, $lt: endDate }
       }).sort({ date: 1 }).toArray();
     } else {
-      transactions = await db.collection('transactions').find().sort({ date: 1 }).toArray();
+      transactions = await db.collection('transactions').find({
+        userId: userId // Ensure the transactions belong to the authenticated user
+      }).sort({ date: 1 }).toArray();
     }
 
     res.json(transactions);
@@ -181,15 +405,16 @@ app.get('/api/transactions/report', async (req, res) => {
 
 
 
-
 // API endpoint to export transactions as PDF, CSV, or for printing
-app.get('/api/transactions/export', async (req, res) => {
-  try {
-    const { type, format } = req.query;
-    let transactions;
+app.get('/api/transactions/export',  async (req, res) => {
+ 
 
+  try {
+    const { type, format} = req.query;
+    let transactions;
+    const userId = req.user.userId;
     if (type === 'all') {
-      transactions = await db.collection('transactions').find().toArray();
+      transactions = await db.collection('transactions').find({ userId }).toArray();
     } else if (type === 'monthly') {
       // Implement logic to fetch monthly transactions
       const currentDate = new Date();
@@ -240,9 +465,9 @@ app.get('/api/transactions/export', async (req, res) => {
       // Draw horizontal line under header
       doc.moveTo(50, 200).lineTo(550, 200).dash(3, { space: 2 }).stroke();
 
-      	  // Draw table rows
+          // Draw table rows
       doc.font('Helvetica');
-      	  let yPos = 200;
+          let yPos = 200;
       transactions.forEach(transaction => {
         doc.text(transaction.description, 50, yPos + 20);
         doc.text(`${transaction.amount.toFixed(2)}`, 300, yPos + 20);
@@ -342,76 +567,39 @@ app.get('/api/transactions/export', async (req, res) => {
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
-// API endpoint to get budget limits
-app.get('/api/budget-limits', async (req, res) => {
+
+
+// API endpoint to get top expenses
+app.get('/api/top-expenses',  async (req, res) => {
   try {
-    // Fetch budget limits from the database
-    const budgetLimits = await db.collection('budgetLimits').findOne({}); // Assuming there's only one set of limits for simplicity
-    res.json(budgetLimits || {});
+    // Use req.user to access the authenticated user's information
+    const userId = req.user.userId;
+
+    // Set the number of top expenses to retrieve
+    const limit = parseInt(req.query.limit) || 5;
+
+    // Fetch top expenses for the authenticated user by sorting transactions in descending order of amount
+    const topExpenses = await db.collection('transactions')
+      .find({ userId }) // Filter transactions by userId
+      .sort({ amount: -1 })
+      .limit(limit)
+      .toArray();
+
+    res.json(topExpenses);
   } catch (error) {
-    console.error('Error fetching budget limits:', error);
-    res.status(500).json({ message: 'Internal Server Error' });
-  }
-});
-
-// API endpoint to set budget limits
-app.post('/api/budget-limits', async (req, res) => {
-  const { category, limit } = req.body;
-
-  try {
-    // Upsert budget limits in the database
-    await db.collection('budgetLimits').updateOne(
-      {},
-      { $set: { [category]: limit } },
-      { upsert: true }
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error setting budget limits:', error);
+    console.error('Error fetching top expenses:', error); // Log the error details
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
 
 
-  
-
-
-
-
-// Add this API endpoint to fetch actual spending data
-app.get('/api/actual-spending', async (req, res) => {
-  try {
-    const actualSpendingData = await db.collection('transactions').aggregate([
-      { $match: { type: 'expense' } },
-      {
-        $group: {
-          _id: '$category',
-          categoryActualSpending: { $sum: { $toDouble: '$amount' } }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          category: '$_id',
-          categoryActualSpending: 1
-        }
-      }
-    ]).toArray();
-
-    res.json(actualSpendingData);
-  } catch (error) {
-    console.error('Error fetching actual spending data:', error);
-    res.status(500).json({ message: 'Internal Server Error' });
-  }
-});
 // Analytics route directly in server.js
-app.get('/api/analytics/expense-distribution', async (req, res) => {
+app.get('/api/analytics/expense-distribution',  async (req, res) => {
   try {
     const expenseDistribution = await db.collection('transactions').aggregate([
       {
-        $match: { type: 'expense' } // Assuming 'type' field represents income or expense
+        $match: { type: 'expense', userId: req.user.userId } // Assuming 'type' field represents income or expense
       },
       {
         $group: {
@@ -440,9 +628,9 @@ app.get('/api/analytics/expense-distribution', async (req, res) => {
 });
 
 
-
 // Fetch income vs. expenses over time data
-app.get('/api/analytics/income-expenses-over-time', async (req, res) => {
+app.get('/api/analytics/income-expenses-over-time',  async (req, res) => {
+  
   try {
     const timeRange = req.query.timeRange || 'monthly';
 
@@ -477,7 +665,6 @@ app.get('/api/analytics/income-expenses-over-time', async (req, res) => {
   }
 });
 
-
 // Function to generate match query based on time range
 function getMatchQueryBasedOnTimeRange(timeRange) {
   const currentDate = new Date();
@@ -495,11 +682,13 @@ function getMatchQueryBasedOnTimeRange(timeRange) {
 
 // API endpoint to get category-wise analysis data
 app.get('/api/category-wise-analysis', async (req, res) => {
+ 
   try {
     // Fetch data from the database for category-wise analysis
     const categoryAnalysisData = await db.collection('transactions').aggregate([
       {
         $match: {
+         
           type: { $in: ['income', 'expense'] }, // Filter by income and expense types
         },
       },
@@ -544,6 +733,8 @@ app.get('/api/category-wise-analysis', async (req, res) => {
 });
 // API endpoint to get daily income and expense data
 app.get('/api/daily-income-expense', async (req, res) => {
+
+  
   try {
     const currentDate = new Date();
     const startOfDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate());
@@ -552,6 +743,7 @@ app.get('/api/daily-income-expense', async (req, res) => {
     const dailyData = await db.collection('transactions').aggregate([
       {
         $match: {
+         
           date: { $gte: startOfDay, $lt: endOfDay },
           type: { $in: ['income', 'expense'] },
         },
@@ -586,9 +778,9 @@ app.get('/api/daily-income-expense', async (req, res) => {
 
 
 
-
 // API endpoint to get category-wise spending trends
 app.get('/api/analytics/category-spending-trends', async (req, res) => {
+  
   const { timeRange } = req.query;
 
   try {
@@ -596,6 +788,7 @@ app.get('/api/analytics/category-spending-trends', async (req, res) => {
     const categorySpendingData = await db.collection('transactions').aggregate([
       {
         $match: {
+         
           date: { $gte: new Date(new Date() - timeRange * 24 * 60 * 60 * 1000) },
           type: 'expense', // Consider only expenses
         },
@@ -630,11 +823,12 @@ app.get('/api/analytics/category-spending-trends', async (req, res) => {
   }
 });
 // API endpoint to fetch top spending categories
-app.get('/api/analytics/top-spending-categories', async (req, res) => {
+app.get('/api/analytics/top-spending-categories',  async (req, res) => {
+ 
   const { timeRange } = req.query;
 
   try {
-    const topCategories = await getTopSpendingCategories(db, timeRange);
+    const topCategories = await getTopSpendingCategories(db,timeRange);
     res.json(topCategories);
   } catch (error) {
     console.error('Error sending top spending categories to frontend:', error);
@@ -642,18 +836,17 @@ app.get('/api/analytics/top-spending-categories', async (req, res) => {
   }
 });
 
-
 // Function to fetch top spending categories
-const getTopSpendingCategories = async (db, timeRange) => {
+const getTopSpendingCategories = async (db,  timeRange) => {
   // Adjust the start and end dates based on your data
   const currentDate = new Date();
   const startDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - (timeRange - 1), 1); // Start of the current month
   const endDate = currentDate;
-  console.log('Fetching top spending categories for the period:', startDate, 'to', endDate);
 
   const aggregationPipeline = [
     {
       $match: {
+        
         date: { $gte: new Date(startDate), $lte: new Date(endDate) },
         type: 'expense',
       },
@@ -673,11 +866,11 @@ const getTopSpendingCategories = async (db, timeRange) => {
   ];
 
   try {
-    console.log('Before aggregation:', await db.collection('transactions').find({ date: { $gte: startDate, $lte: endDate }, type: 'expense' }).toArray());
+   
 
     const topCategories = await db.collection('transactions').aggregate(aggregationPipeline).toArray();
 
-    console.log('Top Spending Categories:', topCategories);
+    
     return topCategories;
   } catch (error) {
     console.error('Error during aggregation:', error);
@@ -686,7 +879,8 @@ const getTopSpendingCategories = async (db, timeRange) => {
 };
 
 // API endpoint to get monthly spending trends
-app.get('/api/analytics/monthly-trends', async (req, res) => {
+
+app.get('/api/analytics/monthly-trends',  async (req, res) => {
   try {
     const timeRange = req.query.timeRange || 6; // Default to 6 months
 
@@ -694,9 +888,12 @@ app.get('/api/analytics/monthly-trends', async (req, res) => {
     const currentDate = new Date();
     const startDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - (timeRange - 1), 1);
 
+    const userId = req.user.userId; // Extract userId from the authenticated user
+
     const monthlySpendingTrends = await db.collection('transactions').aggregate([
       {
         $match: {
+          userId: userId,
           type: 'expense',
           date: { $gte: startDate },
         },
@@ -713,8 +910,6 @@ app.get('/api/analytics/monthly-trends', async (req, res) => {
         $sort: { _id: 1 },
       },
     ]).toArray();
-    console.log('Monthly Spending Trends:', monthlySpendingTrends);
-
 
     const labels = monthlySpendingTrends.map(item => item._id);
     const data = monthlySpendingTrends.map(item => item.totalSpending);
@@ -726,9 +921,11 @@ app.get('/api/analytics/monthly-trends', async (req, res) => {
   }
 });
 // API endpoint to get calendar events with income and expense amounts for each date
-app.get('/api/calendar-events', async (req, res) => {
+app.get('/api/calendar-events', authenticateToken, async (req, res) => {
+  const userId = req.user.userId; // Extract userId from the authenticated user
+
   try {
-    const calendarEvents = await db.collection('transactions').find().toArray();
+    const calendarEvents = await db.collection('transactions').find({ userId }).toArray();
 
     // Group transactions by date and calculate total income and expense for each date
     const groupedEvents = calendarEvents.reduce((acc, event) => {
@@ -774,12 +971,21 @@ app.get('/api/calendar-events', async (req, res) => {
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
+// API endpoint for user signup
 
+// Middleware to check if a valid JWT token is present in the request headers
+
+
+
+// API endpoint for user logout (token invalidation)
+app.post('/api/logout', (req, res) => {
+  // You may implement additional logic for token invalidation (e.g., blacklisting)
+  res.json({ message: 'Logout successful' });
+});
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-
 
 
 // Function to generate random colors
@@ -791,3 +997,4 @@ function generateRandomColors(count) {
   }
   return colors;
 }
+
