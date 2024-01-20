@@ -27,7 +27,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
+// Middleware
+app.use(express.json());
 // MongoDB connection string
 const URL = process.env.DB;
 
@@ -41,8 +42,7 @@ MongoClient.connect(URL)
   })
   .catch((err) => console.error('Error connecting to MongoDB:', err));
 
-// Middleware
-app.use(express.json());
+
 // Registration endpoint
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
