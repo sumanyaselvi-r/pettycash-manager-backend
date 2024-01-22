@@ -137,7 +137,7 @@ app.post('/api/forgot-password', async (req, res) => {
       from: process.env.MAIL_ID,
       to: email,
       subject: 'Reset password link',
-      text: `Click the following link to reset your password: /reset-password/${token}`
+      text: `Click the following link to reset your password: https://master--precious-hummingbird-7f25db.netlify.app/reset-password/${token}`
     });
 
     console.log('Password reset link sent successfully.');
