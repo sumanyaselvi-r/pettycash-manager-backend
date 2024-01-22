@@ -137,7 +137,7 @@ app.post('/api/forgot-password', async (req, res) => {
       from: process.env.MAIL_ID,
       to: email,
       subject: 'Reset password link',
-      text: `Click the following link to reset your password: http://localhost:3000/reset-password/${token}`
+      text: `Click the following link to reset your password: http://${req.headers.host}/reset-password/${token}`
     });
 
     console.log('Password reset link sent successfully.');
